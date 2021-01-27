@@ -1,0 +1,119 @@
+---
+title: "BikeSharing"
+author: "Alyssa Brown"
+date: "1/26/2021"
+output: html_document
+---
+### Libraries/Reading in the Data
+```{r}
+library(tidyverse)
+library(DataExplorer)
+library(caret)
+library(vroom)
+library(lubridate)
+library(ranger)
+library(RchivalTag)
+library(doParallel)
+bike.train <- vroom('/Users/LysLysenko/Desktop/Kaggle/Biketrain.csv')
+bike.test <- vroom('/Users/LysLysenko/Desktop/Kaggle/Biketest.csv')
+bike <- bind_rows(train = bike.train,test = bike.test, .id = 'id')
+```
+
+### Cleaning the Data/Feature Engineering
+```{r}
+## Drop Casual and registered (only in one of our two datasets)
+bike <- bike %>% select(-casual,-registered)
+bike$month <- month(bike$datetime) %>% as.factor()
+bike$weekday <- weekdays(bike$datetime) %>% as.factor()
+bike$season <- as.factor(bike$season)
+bike$holiday <- as.factor(bike$holiday)
+bike$hour <- as.factor(hour(bike$datetime))
+bike$weather <- as.factor(bike$weather)
+bike$year <- as.factor(year(bike$datetime))
+### Normalize Response Variable
+bike$count <- log1p(bike$count)
+### Calculate Daylength & Day/Night 
+bike$Lat <- 38.89511
+bike$Lon <- -77.03637
+sun <- classify_DayTime(get_DayTimeLimits(bike[,c('Lat','Lon','datetime')]))
+bike$daytime <- sun$daytime.long
+bike <- bike %>% select(-Lat,-Lon)
+```
+
+### Exploratory Analysis
+```{r}
+qplot(1:nrow(bike), bike$count, geom = 'point')
+ggplot(data = bike, aes(x = datetime, y = count, color = as.factor(season))) +
+  geom_point()
+ggplot(data = bike, aes(x = datetime, y = count, color = as.factor(month(datetime)))) +
+  geom_point()
+ggplot(data = bike, aes(x= datetime, y = count, color = as.factor(weekdays(datetime)))) +
+  geom_point()
+plot_correlation(bike,type = "continuous", 
+                 cor_args = list(use = 'pairwise.complete.obs'))
+ggplot(data = bike, aes(x = atemp)) +
+  geom_histogram()
+ggplot(data = bike, aes(x = (humidity))) +
+  geom_histogram()
+ggplot(data = bike, aes(x= datetime, y = count, color = as.factor(weekdays(datetime)))) +
+  geom_point()
+plot_missing(bike)
+```
+
+### Dummy Variables
+```{r}
+dummyVars(count~year, data = bike, sep = "_") %>%
+  predict(bike) %>% as.data.frame() %>%
+  bind_cols(bike %>% select(-year), .)
+```
+
+### Target Encoding
+```{r}
+bike$season <- lm(count~season, data = bike) %>% 
+  predict(., newdata = bike %>% select(-count))
+bike$daytime <- lm(count~daytime, data = bike) %>% 
+  predict(., newdata = bike %>% select(-count))
+bike$hour <- lm(count~hour, data = bike) %>% 
+  predict(., newdata = bike %>% select(-count))
+bike$weather <- lm(count~weather, data = bike) %>% 
+  predict(., newdata = bike %>% select(-count))
+bike$month <- lm(count~month, data = bike) %>% 
+  predict(., newdata = bike %>% select(-count))
+bike$weekday <- lm(count~weekday, data = bike) %>% 
+  predict(., newdata = bike %>% select(-count))
+bike$holiday <- lm(count~holiday, data = bike) %>% 
+  predict(., newdata = bike %>% select(-count))
+```
+
+### Fitting the Model
+```{r}
+registerDoParallel(4)
+getDoParWorkers()
+## Fit a model
+bike.model <- train(form = count~year+month+hour+atemp+humidity,
+                    data = bike %>% filter(id == 'train'), 
+                    method = 'ranger',
+                    tuneGrid = expand.grid(mtry=5,
+                                           splitrule = c('variance'),
+                                           min.node.size = 1),
+                    trControl = trainControl(
+                      method = 'repeatedcv',
+                      #Number of groups in dataset, remove one and predict missing for each setting
+                      number = 10,
+                      # NOw do it twice
+                      repeats = 2)
+)
+plot(bike.model)
+```
+
+### Preparing for Submission
+```{r}
+preds <- predict(bike.model, newdata = bike %>% filter(id == 'test'))
+preds <- expm1(preds)
+
+submission <- data.frame(datetime=bike %>% filter(id == 'test') %>% pull(datetime),
+                         count = preds)
+write.csv(x = submission, file = "/Users/LysLysenko/Desktop/Kaggle/MyThirdSubmission.csv", 
+          row.names=FALSE)
+```
+
